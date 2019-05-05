@@ -1,0 +1,423 @@
+/*++
+
+Module Name:
+
+    scsi.c
+
+Date:
+
+    4-Jan-2014
+
+Abstract:
+
+    This file implements the scsi commands.
+
+--*/
+
+
+//
+// Headers
+//
+
+#include <VirtualMiniportScsi.h>
+#include <VirtualMiniportDevice.h>
+#include <VirtualMiniportBus.h>
+#include <VirtualMiniportAdapter.h>
+#include <VirtualMiniportTarget.h>
+#include <VirtualMiniportLun.h>
+
+//
+// WPP based event trace
+//
+
+#include <VirtualMiniportScsi.tmh>
+
+//
+// Forward declarations of private functions
+//
+
+NTSTATUS
+VMSrbExecuteScsilWorker(
+    _In_ PVIRTUAL_MINIPORT_SCHEDULER_WORKITEM WorkItem,
+    _In_ BOOLEAN AbortRequest
+    );
+
+static
+UCHAR
+VMSrbExecuteScsilReportLuns(
+    _In_ PVIRTUAL_MINIPORT_ADAPTER_EXTENSION AdapterExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb
+    );
+
+//
+// Define the attributes of functions; declarations are in module
+// specific header
+//
+
+#pragma alloc_text(NONPAGED, VMSrbExecuteScsi)
+
+#pragma alloc_text(NONPAGED, VMSrbExecuteScsilWorker)
+
+#pragma alloc_text(PAGED, VMSrbExecuteScsilReportLuns)
+
+//
+// Driver specific routines
+//
+
+BOOLEAN
+VMSrbExecuteScsi(
+    _In_ PVIRTUAL_MINIPORT_ADAPTER_EXTENSION AdapterExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb
+    )
+
+/*++
+
+Routine Description:
+
+    Handles the SRB_FUNCTION_EXECUTE_SCSI from the user
+
+Arguments:
+
+    AdapterExtension - Adapter to which this request is directed to
+
+    Srb - SCSI_REQUEST_BLOCK for executeing SCSI commands
+
+Environment:
+
+    IRQL - <= DISPATCH_LEVEL
+
+Return Value:
+
+    TRUE
+    FALSE
+
+--*/
+
+{
+    BOOLEAN Status;
+    BOOLEAN CompleteRequest;
+    BOOLEAN Queued;
+    NTSTATUS NtStatus;
+    PVIRTUAL_MINIPORT_SRB_EXTENSION SrbExtension;
+    PCDB Cdb;
+
+    Status = FALSE;
+    CompleteRequest = FALSE;
+    Queued = FALSE;
+
+    //
+    // We own the SRB extension
+    //
+
+    SrbExtension = Srb->SrbExtension;
+    SrbExtension->Adapter = AdapterExtension;
+    SrbExtension->Srb = Srb;
+    Cdb = (PCDB) Srb->Cdb;
+
+    NtStatus = VMSchedulerInitializeWorkItem((PVIRTUAL_MINIPORT_SCHEDULER_WORKITEM) SrbExtension,
+                                             VMSchedulerHintDefault,
+                                             VMSrbExecuteScsilWorker);
+    if ( !NT_SUCCESS(NtStatus) ) {
+        Status = FALSE;
+        goto Cleanup;
+    }
+
+
+
+    //
+    // Switch on the SCSI function. We switch here in case there are any function codes that
+    // need to be handles straight here than in worker.
+    //
+    switch ( Cdb->CDB6GENERIC.OperationCode ) {
+
+        //
+        // Directly handle SCSI opcode. Anything handled synchronously here will
+        // have to mark CompleteRequest to TRUE so that request is completed later
+        // in this same function.
+        //  1. Mark CompleteRequest to TRUE
+        //  2. Set Srb->SrbStatus to appropriate SCSI status
+        //
+
+    default:
+
+        //
+        // Dispatch all the functions to worker thread. 
+        //
+        if ( VMSchedulerScheduleWorkItem(&(AdapterExtension->Scheduler),
+                                         (PVIRTUAL_MINIPORT_SCHEDULER_WORKITEM) SrbExtension,
+                                         FALSE) == FALSE ) {
+            Status = FALSE;
+        } else {
+            Queued = TRUE;
+            Status = TRUE;
+        }
+        break;
+    }
+
+
+    if ( CompleteRequest == TRUE ) {
+
+        //
+        // Requests that are to be completed synchronously here will come here
+        //
+        StorPortNotification(RequestComplete,
+                             AdapterExtension,
+                             Srb);
+        Status = TRUE;
+    }
+
+Cleanup:
+
+    VMTrace(TRACE_LEVEL_INFORMATION,
+            VM_TRACE_SCSI,
+            "[%s]:AdpaterExtension:%p, Srb:%p, CdbOpCode:0x%02x, CdbLength:0x%0x, Status:%!bool!, Queued:%!bool!, Srb:%!SRB!",
+            __FUNCTION__,
+            AdapterExtension,
+            Srb,
+            Cdb->CDB6GENERIC.OperationCode,
+            Srb->CdbLength,
+            Status,
+            Queued,
+            Srb);
+
+    return(Status);
+}
+
+NTSTATUS
+VMSrbExecuteScsilWorker(
+    _In_ PVIRTUAL_MINIPORT_SCHEDULER_WORKITEM WorkItem,
+    _In_ BOOLEAN Abort
+    )
+
+/*++
+
+Routine Description:
+
+    Handles SRB_FUNCTION_EXECUTE_SCSI offline
+
+Arguments:
+
+    WorkItem - SRB extension in the form of WorkItem
+
+    Abort - Indicates request should be aborted immediately
+
+Environment:
+
+    IRQL - <= DISPATCH_LEVEL
+
+Return Value:
+
+    NTSTATUS
+
+    STATUS_SUCCESS
+    Any other NTSTATUS
+
+--*/
+
+{
+    NTSTATUS Status;
+    PVIRTUAL_MINIPORT_SRB_EXTENSION SrbExtension;
+    PSCSI_REQUEST_BLOCK Srb;
+    UCHAR SrbStatus;
+    PCDB Cdb;
+
+
+    Status = STATUS_SUCCESS;
+    SrbExtension = (PVIRTUAL_MINIPORT_SRB_EXTENSION) WorkItem;
+    Srb = SrbExtension->Srb;
+    Cdb = (PCDB)Srb->Cdb;
+
+    if ( Abort == TRUE ) {
+        VMTrace(TRACE_LEVEL_INFORMATION,
+                VM_TRACE_IOCTL,
+                "[%s]:Srb:%p Aborting",
+                __FUNCTION__,
+                Srb);
+
+        Srb->SrbStatus = SRB_STATUS_ABORTED;
+        goto CompleteRequest;
+    }
+
+    //
+    // Validate the request destination
+    //
+    SrbStatus = VMDeviceValidateAddress(SrbExtension->Adapter,
+                                        Srb->PathId,
+                                        Srb->TargetId,
+                                        Srb->Lun);
+
+    if ( SrbStatus != SRB_STATUS_SUCCESS ) {
+        VMTrace(TRACE_LEVEL_ERROR,
+                VM_TRACE_SCSI,
+                "[%s]:AdapterExtension:%p, Srb:%p path invalid [%02d:%02d:%02d], Status:0x%08x",
+                __FUNCTION__,
+                SrbExtension->Adapter,
+                Srb,
+                Srb->PathId,
+                Srb->TargetId,
+                Srb->Lun,
+                SrbStatus);
+        if ( Cdb->CDB6GENERIC.OperationCode != SCSIOP_REPORT_LUNS ) {
+            Srb->SrbStatus = SrbStatus;
+            goto CompleteRequest;
+        }
+
+        if ( SrbStatus == SRB_STATUS_NO_DEVICE ||
+             SrbStatus == SRB_STATUS_NO_HBA ||
+             SrbStatus == SRB_STATUS_INVALID_PATH_ID ||
+             SrbStatus == SRB_STATUS_INVALID_TARGET_ID ) {
+            Srb->SrbStatus = SrbStatus;
+            goto CompleteRequest;
+        }
+    }
+
+    switch ( Cdb->CDB6GENERIC.OperationCode ) {
+
+        //
+        // SCSI opcodes are handled here case by case basis. Update the Srb->SrbStatus
+        // here is status that we evaluate to.
+        //
+    case SCSIOP_REPORT_LUNS:
+        SrbStatus = VMSrbExecuteScsilReportLuns(SrbExtension->Adapter,
+                                                Srb);
+        Srb->SrbStatus = SrbStatus;
+        break;
+
+    default:
+
+        //
+        // All other unhandled request are treated invalid request
+        //
+        Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+        break;
+    
+    }
+
+CompleteRequest:
+
+    VMTrace(TRACE_LEVEL_INFORMATION,
+            VM_TRACE_SCSI,
+            "[%s]:AdpaterExtension:%p, Srb:%p, CdbOpCode:0x%02x, CdbLength:0x%0x, SrbStatus:0x%08x, Srb:%!SRB!",
+            __FUNCTION__,
+            SrbExtension->Adapter,
+            Srb,
+            Cdb->CDB6GENERIC.OperationCode,
+            Srb->CdbLength,
+            Srb->SrbStatus,
+            Srb);
+
+    //
+    // Now that we are done with the request, complete the request
+    //
+    StorPortNotification(RequestComplete,
+        SrbExtension->Adapter,
+        Srb);
+    return(Status);
+}
+
+static
+UCHAR
+VMSrbExecuteScsilReportLuns(
+    _In_ PVIRTUAL_MINIPORT_ADAPTER_EXTENSION AdapterExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb
+    )
+
+/*++
+
+Routine Description:
+
+    Handles SRBOP_REPORT_LUNS
+
+Arguments:
+
+    AdapterExtension - Adapter to which this request is queued
+
+    Srb - Srb to process
+
+Environment:
+
+    IRQL - PASSIVE_LEVEL
+
+Return Value:
+
+    SRB_STATUS_XXX
+
+--*/
+
+{
+    NTSTATUS Status;
+    UCHAR SrbStatus;
+    ULONG BufferLength;
+    PLUN_LIST LunList;
+    PVIRTUAL_MINIPORT_BUS Bus;
+    PVIRTUAL_MINIPORT_TARGET Target;
+    UCHAR BusId, TargetId, LunId, LunListIndex;
+    
+    SrbStatus = SRB_STATUS_ERROR;
+    Bus = NULL;
+    Target = NULL;
+    BusId = 0;
+    TargetId = 0;
+    LunListIndex = 0;
+
+    Status = VMBusQueryById(AdapterExtension, Srb->PathId, &Bus, FALSE);
+
+    if ( !NT_SUCCESS(Status) ) {
+        SrbStatus = SRB_STATUS_INVALID_PATH_ID;
+        goto Cleanup;
+    }
+
+    Status = VMTargetQueryById(AdapterExtension, Bus, Srb->TargetId, &Target, FALSE);
+    if ( !NT_SUCCESS(Status) ) {
+        SrbStatus = SRB_STATUS_INVALID_TARGET_ID;
+        goto Cleanup;
+    }
+
+    if ( VMLockAcquireShared(&(Target->TargetLock)) == TRUE ) {
+
+        LunList = Srb->DataBuffer;
+        BufferLength = sizeof(LUN_LIST) +(8 * Target->MaxLunCount);
+        
+        //
+        // Byte swap the length
+        //
+        *((PULONG) &(LunList->LunListLength)) = _byteswap_ulong(LunListIndex);
+
+        SrbStatus = SRB_STATUS_DATA_OVERRUN;
+
+        if ( BufferLength <= Srb->DataTransferLength ) {
+
+            RtlZeroMemory(Srb->DataBuffer, Srb->DataTransferLength);
+            for ( LunId = 0, LunListIndex = 0; LunId < Target->MaxLunCount; LunId++ ) {
+                if ( Target->Luns [LunId] != VIRTUAL_MINIPORT_INVALID_POINTER ) {
+                    LunList->Lun [LunListIndex][0] = 0;
+                    LunList->Lun [LunListIndex][1] = LunId;
+                    LunList->Lun [LunListIndex][2] = 0;
+                    LunList->Lun [LunListIndex][3] = 0;
+                    LunList->Lun [LunListIndex][4] = 0;
+                    LunList->Lun [LunListIndex][5] = 0;
+                    LunList->Lun [LunListIndex][6] = 0;
+                    LunList->Lun [LunListIndex][7] = 0;
+                    LunListIndex++;
+                }
+            }
+
+            SrbStatus = SRB_STATUS_SUCCESS;
+        }
+        VMLockReleaseShared(&(Target->TargetLock));
+    }
+
+Cleanup:
+    VMTrace(TRACE_LEVEL_INFORMATION,
+            VM_TRACE_SCSI,
+            "[%s]:AdapterExtension:%p, Bus:%p, Target:%p [%02d.%02d], Reported lun count:%d, SrbStatus:0x%08x",
+            __FUNCTION__,
+            AdapterExtension,
+            Bus,
+            Target,
+            BusId,
+            TargetId,
+            LunListIndex,
+            SrbStatus);
+    return(SrbStatus);
+}

@@ -1,0 +1,39 @@
+;
+; AccelerIO.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Virtual ; TODO: edit Class
+ClassGuid={4927BD0B-EFFA-4376-838E-B8B73B8E589B}
+Provider=%ManufacturerName%
+DriverVer= ; TODO: set DriverVer in stampinf property pages
+CatalogFile=AccelerIO.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+AccelerIO.sys = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%AccelerIO.DeviceDesc%=AccelerIO_Device, Root\AccelerIO ; TODO: edit hw-id
+
+[AccelerIO_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+AccelerIO.sys
+
+[Strings]
+ManufacturerName="AccelerIO"
+ClassName="Virtual"
+DiskName="AccelerIO Source Disk"
+AccelerIO.DeviceDesc = "AccelerIO Device"

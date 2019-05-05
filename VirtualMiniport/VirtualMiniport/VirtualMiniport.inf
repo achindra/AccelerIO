@@ -1,0 +1,149 @@
+;
+; Module Name:
+;
+;    VirtualMiniport.inf
+;
+; Date:
+;
+;    28-Jan-2014
+;
+; Abstract:
+;
+;    Install file for the driver
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=SCSIAdapter
+ClassGuid={4d36e97b-e325-11ce-bfc1-08002be10318}
+Provider=%OrganizationName%
+CatalogFile=VirtualMiniport.cat
+DriverVer=01/28/2014,1.0.0000.00000
+DriverPackageDisplayName=DriverPackageDisplayName
+
+[DestinationDirs]
+DefaultDestDir = 12 ; \Drivers
+
+[Manufacturer]
+;%ManufacturerName%=VirtualMiniport, NT$ARCH$
+%ManufacturerName%=VirtualMiniport, NTamd64
+
+; We dont bother about the architecture
+
+;[SourceDisksNames.NT$ARCH$]
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+;[SourceDisksFiles.NT$ARCH$]
+[SourceDisksFiles]
+VirtualMiniport.sys = 1
+
+; Start defining the installation procedure
+
+;[Standard.NT$ARCH$]
+;[VirtualMiniport.NT$ARCH$]
+[VirtualMiniport.NTamd64]
+%DeviceDescription% = VirtualMiniportDevice, %rootstr%
+
+;[VirtualMiniportDevice.NT$ARCH$]
+[VirtualMiniportDevice]
+CopyFiles = @VirtualMiniport.sys
+
+;[VirtualMiniportDevice.NT$ARCH$.HW]
+[VirtualMiniportDevice.HW]
+AddReg = VirtualMiniport_Device_AddReg
+
+; This is allow storport to send adapter control on shutdown
+
+[VirtualMiniportDevice_AddReg]
+HKR, "ScsiPort", "NeedsSystemShutdownNotification", %REG_DWORD%, 1
+
+[VirtualMiniportDevice.Services]
+AddService = VirtualMiniport, %SPSVCINST_ASSOCSERVICE%, VirtualMiniportService_Inst
+
+[VirtualMiniportService_Inst]
+DisplayName    = %DeviceDescription%
+ServiceType    = %SERVICE_KERNEL_DRIVER%
+StartType      = %SERVICE_SYSTEM_START% ; We will make it boot start later
+ErrorControl   = %SERVICE_ERROR_NORMAL%
+ServiceBinary  = %12%\VirtualMiniport.sys
+LoadOrderGroup = SCSI Miniport
+AddReg         = pnpsafe_isa_addreg
+
+[pnpsafe_isa_addreg]
+HKR, "Parameters", "BreakOnEntry", %REG_DWORD%,  0x00000000
+HKR, "Parameters", "BusType", %REG_DWORD%, %BusTypeSas% ; XXX set this to Sas bus later if needed
+HKR, "Configuration", "NumberOfAdapters", %REG_DWORD%, %SCSI_MINIMUM_NUMBER_OF_ADAPTERS%
+HKR, "Configuration", "BusesPerAdapter", %REG_DWORD%, %SCSI_MINIMUM_BUSES_PER_ADAPTER%
+HKR, "Configuration", "TargetsPerBus", %REG_DWORD%, %SCSI_MINIMUM_TARGETS_PER_BUS%
+HKR, "Configuration", "LunsPerTarget", %REG_DWORD%, %SCSI_MINIMUM_LUNS_PER_TARGET%
+HKR, "Configuration", "PhysicalBreaks", %REG_DWORD%, 0x00000000
+
+HKR, "Configuration", "VendorID", %REG_SZ%, %VendorID%
+HKR, "Configuration", "ProductID", %REG_SZ%, %ProductID%
+HKR, "Configuration", "ProductRevision", %REG_SZ%, %ProductRevision%
+; Make thie quad word when we know the constant for quadword
+HKR, "Configuration", "DeviceSizeMax", %REG_DWORD%, %VIRTUAL_MINIPORT_DEVICE_SIZE_MAXIMUM%
+HKR, "Configuration", "MetadataLocation", %REG_SZ%, %MetadataLocation%
+
+[Strings]
+OrganizationName="AccelerIO Corportation"
+DriverPackageDisplayName="Virtual Miniport Package"
+DeviceDescription="Storport Virtual Miniport Adapter"
+ManufacturerName="AccelerIO Corportation"
+DiskName="VirtualMiniport Source Disk"
+rootstr="root\VMAdapter"
+VendorID="Msft"
+ProductID="SVM" ; Storage Virtual Miniport
+ProductRevision="1000"
+MetadataLocation="\Global??\C:\Windows\"
+
+;*******************************************
+;Handy macro substitutions (non-localizable)
+SPSVCINST_ASSOCSERVICE = 0x00000002
+SERVICE_KERNEL_DRIVER  = 1
+SERVICE_BOOT_START     = 0
+SERVICE_SYSTEM_START   = 1
+SERVICE_DEMAND_START   = 3
+SERVICE_ERROR_NORMAL   = 1
+
+;Registry value types
+REG_DWORD              = 0x00010001
+REG_QWORD              = 0x000B0001 
+REG_BINARY             = 0x00000001
+REG_SZ                 = 0x00000000
+
+;Bus types
+BusTypeScsi            = 0x00000001
+BusTypeAtapi           = 0x00000002
+BusTypeAta             = 0x00000003
+BusTypeiScsi           = 0x00000009
+BusTypeSas             = 0x0000000A
+BusTypeVirtual         = 0x0000000E
+BusTypeFileBackedVirtual = 0x0000000F
+
+;Constants defined in storport.h
+;#define SCSI_MAXIMUM_BUSES_PER_ADAPTER 255
+;#define SCSI_MAXIMUM_TARGETS_PER_BUS 128
+;#define SCSI_MAXIMUM_LUNS_PER_TARGET 255
+;
+; Change minimum for testing, else minimums will be 1
+;SCSI_MINIMUM_NUMBER_OF_ADAPTERS      = 0x00000001
+;SCSI_MINIMUM_BUSES_PER_ADAPTER       = 0x00000001
+;SCSI_MINIMUM_TARGETS_PER_BUS         = 0x00000001
+;SCSI_MINIMUM_LUNS_PER_TARGET         = 0x00000001
+
+SCSI_MINIMUM_NUMBER_OF_ADAPTERS      = 0x00000002
+SCSI_MINIMUM_BUSES_PER_ADAPTER       = 0x00000002
+SCSI_MINIMUM_TARGETS_PER_BUS         = 0x00000002
+SCSI_MINIMUM_LUNS_PER_TARGET         = 0x00000002
+SCSI_MAXIMUM_NUMBER_OF_ADAPTERS      = 0xffffffff
+SCSI_MAXIMUM_BUSES_PER_ADAPTER       = 0x000000ff
+SCSI_MAXIMUM_TARGETS_PER_BUS         = 0x00000080
+SCSI_MAXIMUM_LUNS_PER_TARGET         = 0x000000ff
+
+;Storage Virtual Miniport definitions
+
+VIRTUAL_MINIPORT_DEVICE_SIZE_MINIMUM = 0x00A00000 ; 10MB
+VIRTUAL_MINIPORT_DEVICE_SIZE_MAXIMUM = 0xFFFFFFFF ; 4GB
+
